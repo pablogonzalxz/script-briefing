@@ -1,4 +1,3 @@
-from openai import embeddings
 import os
 from langchain_community.vectorstores import Chroma
 from langchain_openai import OpenAIEmbeddings

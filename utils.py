@@ -7,7 +7,11 @@ from openai import OpenAI
 from langchain_core.documents import Document
 import uuid
 from datetime import datetime
-from embedding import *
+from embedding import (
+    get_user_collection,
+    default_vectorstore,
+    text_splitter,
+)
 
 load_dotenv()
 client = OpenAI()
@@ -24,14 +28,11 @@ tom = "Meme"
 
 async def store_document(text, title):
     """Split and store a document in the vector database"""
-    # Generate a unique document ID
     doc_id = str(uuid.uuid4())
     date = datetime.now().isoformat()
 
-    # Split text into chunks
     texts = text_splitter.split_text(text)
 
-    # Create documents with metadata
     documents = [
         Document(
             page_content=chunk,
@@ -40,7 +41,6 @@ async def store_document(text, title):
         for i, chunk in enumerate(texts)
     ]
 
-    # Add documents to vector store
     default_vectorstore.add_documents(documents)
     default_vectorstore.persist()
 
@@ -50,14 +50,11 @@ async def store_document(text, title):
 
 async def store_user_script(user_id, text, title):
     """Split and store a script in the user's vector database"""
-    # Generate a unique document ID
     doc_id = str(uuid.uuid4())
     date = datetime.now().isoformat()
 
-    # Split text into chunks
     texts = text_splitter.split_text(text)
 
-    # Create documents with metadata
     documents = [
         Document(
             page_content=chunk,
@@ -136,73 +133,7 @@ def prepare_context_from_docs(docs):
     return context_text
 
 
-def generate_script(briefing):
-    prompt = f"""
-Você é um redator criativo especializado em roteiros audiovisuais para campanhas publicitárias em redes sociais (Instagram/TikTok). Seu trabalho é criar roteiros dinâmicos e emocionais para vídeos curtos de campanhas, baseados em briefings fornecidos. O roteiro deve ser impactante e otimizado para performance, com uma narrativa clara e envolvente.
-
-Com base no briefing a seguir, crie um roteiro completo, estruturado da seguinte forma:
-
-Título (curto e criativo, de até 6 palavras)
-
-Duração sugerida (ex: 30s ou 45s)
-
-Estrutura narrativa:
-
-Abertura impactante (Hook): Descrição das primeiras imagens impactantes que devem capturar a atenção do público logo nos primeiros 3 segundos.
-
-Desenvolvimento emocional ou divertido: Discurso envolvente que explora o conceito da campanha, destacando produtos ou serviços oferecidos. O desenvolvimento deve criar uma conexão emocional com o público-alvo.
-
-Chamada para ação clara (CTA): Um convite direto ao público, estimulando a ação desejada (como visitar a loja ou comprar).
-
-Linguagem e estilo de edição alinhados à plataforma (Instagram/TikTok) e ao público-alvo (decisores de compra, como filhos e netos).
-
-Tom e ritmo do vídeo: o tom é de {tom} e ajuste o ritmo da narrativa para garantir fluidez e engajamento.
-
-Observações importantes:
-
-Não mencionar preços, promoções ou concorrentes.
-
-Usar apenas os produtos da marca (exceto no caso de eletrodomésticos e eletrônicos destacados).
-
-A edição deve ser dinâmica, com cortes rápidos e visuais atraentes.
-
-Evitar tons negativos ou desrespeitosos.
-
-Gere o roteiro com 250 palavras ou mais, respeitando os seguintes critérios:
-
-Objetividade e clareza na apresentação do conceito da campanha.
-
-Uso de linguagem envolvente para criar uma experiência emocional.
-
-Ritmo e transições dinâmicas otimizadas para a duração curta de vídeos em plataformas como Instagram e TikTok.
-
-Baseie o roteiro nas diretrizes abaixo:
-{briefing}
-"""
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4.1",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Você é um redator criativo especialista em roteiros audiovisuais.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=1,
-            max_tokens=2048,
-            top_p=1,
-        )
-
-        roteiro = response.choices[0].message.content
-        return roteiro
-    except Exception as e:
-        print("Erro ao gerar o roteiro:", e)
-        return str(e)
-
-
-def generate_script_with_inspiration(briefing, context=""):
+def generate_script(briefing, context=""):
     prompt = f"""
 Você é um redator criativo especializado em roteiros audiovisuais para campanhas publicitárias em redes sociais (Instagram/TikTok). Seu trabalho é criar roteiros dinâmicos e emocionais para vídeos curtos de campanhas, baseados em briefings fornecidos. O roteiro deve ser impactante e otimizado para performance, com uma narrativa clara e envolvente.
 
