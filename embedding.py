@@ -11,7 +11,7 @@ PERSIST_DIRECTORY = "./chroma_db"
 class UserScriptCollection:
     def __init__(self, user_id: str):
         self.user_id = user_id
-        self.collection_name = f"user_{user_id}_scrits"
+        self.collection_name = f"user_{user_id}_scripts"
         self.persist_directory = os.path.join(PERSIST_DIRECTORY, self.collection_name)
         os.makedirs(self.persist_directory, exist_ok=True)
 

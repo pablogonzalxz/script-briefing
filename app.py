@@ -4,7 +4,6 @@ from dotenv import load_dotenv
 import os
 from openai import OpenAI
 from utils import (
-    store_document,
     store_user_script,
     get_user_scripts_context,
     prepare_context_from_docs,
@@ -12,10 +11,9 @@ from utils import (
     get_media_url,
     download_media,
     extract_text_from_pdf,
-    save_text_to_file
+    save_text_to_file,
 )
 from embedding import default_vectorstore
-
 
 load_dotenv()
 client = OpenAI()
@@ -25,6 +23,7 @@ prompt_briefing = os.getenv("PROMPT_BRIEFING")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 GRAPH_URL = os.getenv("GRAPH_URL")
+
 
 @app.post("/webhook")
 async def receive_message(request: Request):
@@ -75,16 +74,16 @@ async def receive_webhook(request: Request):
                         await store_user_script(sender_id, extracted_text, file_path)
                         return {"status": "script received"}
                     else:
-                        await store_document(extracted_text, file_path)
+                        await store_user_script(extracted_text, file_path)
                         context_docs = await get_user_scripts_context(sender_id)
 
                         if context_docs:
                             context_text = prepare_context_from_docs(context_docs)
                             roteiro = generate_script(
-                                extracted_text, context_text
+                                sender_id, extracted_text, context_text
                             )
                         else:
-                            roteiro = generate_script(extracted_text)
+                            roteiro = generate_script(sender_id, extracted_text)
 
                     script_file_path = "roteiro.txt"
                     with open(script_file_path, "w", encoding="utf-8") as f:
@@ -121,7 +120,7 @@ async def upload_pdf(
         await store_user_script(user_id, extracted_text, doc_title)
         return {"status": "ok", "message": "Script stored for user inspiration"}
     else:
-        await store_document(extracted_text, doc_title)
+        await store_user_script(extracted_text, doc_title)
         try:
             context_docs = await get_user_scripts_context(user_id)
 
@@ -149,6 +148,7 @@ async def upload_pdf(
             }
         except Exception as e:
             return {"error": str(e)}
+
 
 @app.get("/list-documents")
 async def list_documents():

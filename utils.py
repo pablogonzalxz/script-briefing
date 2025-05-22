@@ -6,7 +6,10 @@ import os
 from openai import OpenAI
 from langchain_core.documents import Document
 import uuid
+from langchain.chains import RetrievalQA
+from langchain_community.chat_models import ChatOpenAI
 from datetime import datetime
+from template import prompt_template
 from embedding import (
     get_user_collection,
     default_vectorstore,
@@ -21,61 +24,47 @@ prompt_briefing = os.getenv("PROMPT_BRIEFING")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 GRAPH_URL = os.getenv("GRAPH_URL")
-base_prompt = os.getenv("PROMPT_BASE")
-
-tom = "Meme"
+template = os.getenv("PROMPT_BRIEFING")
 
 
-async def store_document(text, title):
-    """Split and store a document in the vector database"""
-    doc_id = str(uuid.uuid4())
-    date = datetime.now().isoformat()
-
-    texts = text_splitter.split_text(text)
-
-    documents = [
-        Document(
-            page_content=chunk,
-            metadata={"doc_id": doc_id, "title": title, "date": date, "chunk": i},
+class RAG:
+    def __init__(self, user_id):
+        self.user_id = user_id
+        self.user_vectorstore = get_user_collection(user_id)
+        self.retriever = self.user_vectorstore.as_retriever(search_kwargs={"k": 4})
+        self.llm = ChatOpenAI(model="gpt-4.1", temperature=1)
+        self.chain = RetrievalQA.from_chain_type(
+            llm=self.llm,
+            retriever=self.retriever,
+            chain_type="stuff",
+            return_source_documents=True,
         )
-        for i, chunk in enumerate(texts)
-    ]
 
-    default_vectorstore.add_documents(documents)
-    default_vectorstore.persist()
+    async def store_user_script(self, text, title):
+        """Split and store a script in the user's vector database"""
+        doc_id = str(uuid.uuid4())
+        date = datetime.now().isoformat()
 
-    print(f"Stored document: {title} with ID: {doc_id}")
-    return doc_id
+        texts = text_splitter.split_text(text)
+        metadata_base = {
+            "doc_id": doc_id,
+            "title": title,
+            "date": date,
+            "user_id": self.user_id
+        }
+        documents = [
+            Document(
+                page_content=chunk,
+                metadata={**metadata_base, "chunk": i}
+            )
+            for i, chunk in enumerate(texts)
+        ]
 
+        self.user_vectorstore.add_documents(documents)
+        self.user_vectorstore.persist()
 
-async def store_user_script(user_id, text, title):
-    """Split and store a script in the user's vector database"""
-    doc_id = str(uuid.uuid4())
-    date = datetime.now().isoformat()
-
-    texts = text_splitter.split_text(text)
-
-    documents = [
-        Document(
-            page_content=chunk,
-            metadata={
-                "doc_id": doc_id,
-                "title": title,
-                "date": date,
-                "chunk": i,
-                "user_id": user_id,
-                "type": "user_script",
-            },
-        )
-        for i, chunk in enumerate(texts)
-    ]
-
-    user_vectorstore = get_user_collection(user_id)
-    user_vectorstore.add_documents(documents)
-    user_vectorstore.persist()
-
-    print(f"Stored user script: {title} with ID: {doc_id} for user: {user_id}")
-    return doc_id
+        print(f"Stored user script: {title} with ID: {doc_id} for user: {self.user_id}")
+        return doc_id
 
 
 async def search_similar_documents(query, k=3, threshold=0.7):
@@ -133,71 +122,16 @@ def prepare_context_from_docs(docs):
     return context_text
 
 
-def generate_script(briefing, context=""):
-    prompt = f"""
-Você é um redator criativo especializado em roteiros audiovisuais para campanhas publicitárias em redes sociais (Instagram/TikTok). Seu trabalho é criar roteiros dinâmicos e emocionais para vídeos curtos de campanhas, baseados em briefings fornecidos. O roteiro deve ser impactante e otimizado para performance, com uma narrativa clara e envolvente.
-
-Com base no briefing a seguir, crie um roteiro completo, estruturado da seguinte forma:
-
-Título (curto e criativo, de até 6 palavras)
-
-Duração sugerida (ex: 30s ou 45s)
-
-Estrutura narrativa:
-
-Abertura impactante (Hook): Descrição das primeiras imagens impactantes que devem capturar a atenção do público logo nos primeiros 3 segundos.
-
-Desenvolvimento emocional ou divertido: Discurso envolvente que explora o conceito da campanha, destacando produtos ou serviços oferecidos. O desenvolvimento deve criar uma conexão emocional com o público-alvo.
-
-Chamada para ação clara (CTA): Um convite direto ao público, estimulando a ação desejada (como visitar a loja ou comprar).
-
-Linguagem e estilo de edição alinhados à plataforma (Instagram/TikTok) e ao público-alvo (decisores de compra, como filhos e netos).
-
-Tom e ritmo do vídeo: o tom é de {tom} e ajuste o ritmo da narrativa para garantir fluidez e engajamento.
-
-Observações importantes:
-
-Não mencionar preços, promoções ou concorrentes.
-
-Usar apenas os produtos da marca (exceto no caso de eletrodomésticos e eletrônicos destacados).
-
-A edição deve ser dinâmica, com cortes rápidos e visuais atraentes.
-
-Evitar tons negativos ou desrespeitosos.
-
-Gere o roteiro com 250 palavras ou mais, respeitando os seguintes critérios:
-
-Objetividade e clareza na apresentação do conceito da campanha.
-
-Uso de linguagem envolvente para criar uma experiência emocional.
-
-Ritmo e transições dinâmicas otimizadas para a duração curta de vídeos em plataformas como Instagram e TikTok.
-
-{context}
-
-Baseie o roteiro nas diretrizes abaixo:
-{briefing}
-"""
+def generate_script(user_id, briefing, context=""):
+    prompt = prompt_template.format(context_str=context, briefing_str=briefing)
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4.1",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Você é um redator criativo especialista em roteiros audiovisuais que se inspira em exemplos anteriores para criar conteúdo único e impactante.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=1,
-            max_tokens=2048,
-            top_p=1,
-        )
-
-        roteiro = response.choices[0].message.content
+        rag_chain = RAG(user_id)
+        result = rag_chain.chain({"query": prompt})
+        roteiro = result["result"]
         return roteiro
     except Exception as e:
-        print("Erro ao gerar o roteiro com inspiração:", e)
+        print("error generate inspo", e)
         return str(e)
 
 
