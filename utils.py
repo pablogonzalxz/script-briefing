@@ -1,9 +1,7 @@
-from fastapi import FastAPI
 import fitz
-import httpx
+import requests
 from dotenv import load_dotenv
 import os
-from openai import OpenAI
 from langchain_core.documents import Document
 import uuid
 from langchain.chains import RetrievalQA
@@ -12,19 +10,14 @@ from datetime import datetime
 from template import prompt_template
 from embedding import (
     get_user_collection,
-    default_vectorstore,
     text_splitter,
 )
 
 load_dotenv()
-client = OpenAI()
-app = FastAPI()
-prompt_briefing = os.getenv("PROMPT_BRIEFING")
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 GRAPH_URL = os.getenv("GRAPH_URL")
-template = os.getenv("PROMPT_BRIEFING")
 
 
 class RAG:
@@ -67,91 +60,63 @@ class RAG:
         return doc_id
 
 
-async def search_similar_documents(query, k=3, threshold=0.7):
-    results = default_vectorstore.similarity_search_with_score(query, k=k * 2)
-
-    filtered_results = [doc for doc, score in results if score >= threshold][:k]
-
-    return filtered_results
-
-
-async def search_user_scripts(user_id, query, k=3, threshold=0.7):
-    user_vectorstore = get_user_collection(user_id)
-
-    results = user_vectorstore.similarity_search_with_score(query, k=k * 2)
-
-    filtered_results = [doc for doc, score in results if score >= threshold][:k]
-
-    return filtered_results
-
-
-async def get_user_scripts_context(user_id, max_scripts=4):
-    """Get user scripts to use as context, even without a specific query"""
-    try:
+    async def search_user_scripts(self, user_id, query, k=3, threshold=0.7):
         user_vectorstore = get_user_collection(user_id)
-        results = user_vectorstore.similarity_search("", k=max_scripts * 2)
 
-        doc_groups = {}
-        for doc in results:
-            doc_id = doc.metadata.get("doc_id", "unknown")
-            if doc_id not in doc_groups:
-                doc_groups[doc_id] = []
-            doc_groups[doc_id].append(doc)
+        results = user_vectorstore.similarity_search_with_score(query, k=k * 2)
 
-        context_docs = []
-        for doc_id, chunks in list(doc_groups.items())[:max_scripts]:
-            sorted_chunks = sorted(chunks, key=lambda x: x.metadata.get("chunk", 0))
-            if sorted_chunks:
-                context_docs.append(sorted_chunks[0])
+        filtered_results = [doc for doc, score in results if score >= threshold][:k]
 
-        return context_docs
-    except Exception as e:
-        print(f"Error getting user scripts: {e}")
-        return []
+        return filtered_results
 
 
-def prepare_context_from_docs(docs):
-    if not docs:
-        return ""
+    async def get_user_scripts_context(self, user_id, max_scripts=4):
+        """Get user scripts to use as context, even without a specific query"""
+        try:
+            user_vectorstore = get_user_collection(user_id)
+            results = user_vectorstore.similarity_search("", k=max_scripts * 2)
 
-    context_text = "Inspiração de roteiros anteriores do usuário:\n\n"
-    for i, doc in enumerate(docs, 1):
-        title = doc.metadata.get("title", f"Script {i}")
-        context_text += f"--- {title} ---\n{doc.page_content}\n\n"
+            doc_groups = {}
+            for doc in results:
+                doc_id = doc.metadata.get("doc_id", "unknown")
+                if doc_id not in doc_groups:
+                    doc_groups[doc_id] = []
+                doc_groups[doc_id].append(doc)
 
-    return context_text
+            context_docs = []
+            for doc_id, chunks in list(doc_groups.items())[:max_scripts]:
+                sorted_chunks = sorted(chunks, key=lambda x: x.metadata.get("chunk", 0))
+                if sorted_chunks:
+                    context_docs.append(sorted_chunks[0])
 
-
-def generate_script(user_id, briefing, context=""):
-    prompt = prompt_template.format(context_str=context, briefing_str=briefing)
-
-    try:
-        rag_chain = RAG(user_id)
-        result = rag_chain.chain({"query": prompt})
-        roteiro = result["result"]
-        return roteiro
-    except Exception as e:
-        print("error generate inspo", e)
-        return str(e)
-
-
-async def get_media_url(media_id):
-    headers = {"authorization": f"bearer {WHATSAPP_TOKEN}"}
-    url = f"{GRAPH_URL}/{media_id}"
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, headers=headers)
-        return resp.json().get("url")
+            return context_docs
+        except Exception as e:
+            print(f"Error getting user scripts: {e}")
+            return []
 
 
-async def download_media(url):
-    headers = {"authorization": f"bearer {WHATSAPP_TOKEN}"}
-    filename = "archive.pdf"
-    async with httpx.AsyncClient() as client:
-        response = await client.get(url, headers=headers)
-        with open(filename, "wb") as f:
-            f.write(response.content)
-    return filename
+    def prepare_context_from_docs(self, docs):
+        if not docs:
+            return ""
 
+        context_text = "Inspiração de roteiros anteriores do usuário:\n\n"
+        for i, doc in enumerate(docs, 1):
+            title = doc.metadata.get("title", f"Script {i}")
+            context_text += f"--- {title} ---\n{doc.page_content}\n\n"
+
+        return context_text
+
+
+    def generate_script(self ,user_id, briefing, context=""):
+        prompt = prompt_template.format(context_str=context, briefing_str=briefing)
+
+        try:
+            result = self.chain({"query": prompt})
+            roteiro = result["result"]
+            return roteiro
+        except Exception as e:
+            print("error generate inspo", e)
+            return str(e)
 
 def extract_text_from_pdf(file_path):
     text = ""
@@ -169,3 +134,18 @@ def extract_text_from_pdf(file_path):
 def save_text_to_file(text, filename="extracted_text.txt"):
     with open(filename, "w", encoding="utf-8") as f:
         f.write(text)
+
+def send_text_message(sender_id: str, message_text: str):
+    url = "http://localhost:3000/send-message" 
+    payload = {
+        "to": sender_id,
+        "message": message_text
+    }
+
+    try:
+        response = requests.post(url, json=payload)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        print(f"error send to api node {e}")
+        return None

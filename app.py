@@ -1,20 +1,17 @@
+import uuid
 from fastapi import FastAPI, Request, UploadFile, File, Form
 import json
 from dotenv import load_dotenv
 import os
 from openai import OpenAI
+import re
 from utils import (
-    store_user_script,
-    get_user_scripts_context,
-    prepare_context_from_docs,
-    generate_script,
-    get_media_url,
-    download_media,
+    RAG,
     extract_text_from_pdf,
     save_text_to_file,
+    send_text_message
 )
 from embedding import default_vectorstore
-
 load_dotenv()
 client = OpenAI()
 app = FastAPI()
@@ -24,16 +21,10 @@ VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 GRAPH_URL = os.getenv("GRAPH_URL")
 
+def clean_id(sender_id):
+    return re.sub(r'[^a-zA-Z0-9_\-]', '_', sender_id)
 
-@app.post("/webhook")
-async def receive_message(request: Request):
-    data = await request.json()
-    print("message received:")
-    print(json.dumps(data, indent=2))
-    return {"status": "received"}
-
-
-@app.post("/webhook/file")
+@app.post("/receive_webhook")
 async def receive_webhook(request: Request):
     body = await request.json()
     print("message received:")
@@ -44,59 +35,63 @@ async def receive_webhook(request: Request):
         changes = entry["changes"][0]
         value = changes["value"]
         messages = value.get("messages")
-
         if messages:
+            print("if messages")
             message = messages[0]
-            sender_id = message["from"]
+            id_user = message["from"]
             msg_type = message.get("type")
-
+            sender_id = clean_id(id_user)
+            rag = RAG(sender_id)
             if msg_type == "document":
-                mime_type = message["document"].get("mime_type")
-                media_id = message["document"].get("id")
+                print("document")
+                document = message.get("document", {})
+                file_path = document.get("file_path")
+                file_name = os.path.basename(file_path).lower()
 
-                if mime_type in [
-                    "application/pdf",
-                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                ]:
-                    print("document received")
-                    media_url = await get_media_url(media_id)
-                    file_path = await download_media(media_url)
-                    print(f"saved in: {file_path}")
-                    extracted_text = extract_text_from_pdf(file_path)
-                    save_text_to_file(extracted_text)
+                if not file_path or not os.path.exists(file_path):
+                    return {"status": "error", "detail": "Arquivo não encontrado."}
 
-                    is_script = any(
-                        keyword in file_path.lower()
-                        for keyword in ["script", "roteiro", "screenplay"]
-                    )
+                print(f"Arquivo recebido em: {file_path}")
+                extracted_text = extract_text_from_pdf(file_path)
+                save_text_to_file(extracted_text)
 
-                    if is_script:
-                        await store_user_script(sender_id, extracted_text, file_path)
-                        return {"status": "script received"}
+                is_script = any(
+                    keyword in file_name.lower()
+                    for keyword in ["script", "roteiro", "screenplay"]
+                )
+
+                if is_script:
+                    await rag.store_user_script(extracted_text, file_path)
+                    return {"status": "script received"}
+                else:
+                    similar_docs = await rag.search_user_scripts(sender_id, extracted_text)
+                    
+                    if not similar_docs:
+                        similar_docs = await rag.get_user_scripts_context(sender_id)
+
+                    if similar_docs:
+                        context_text = rag.prepare_context_from_docs(similar_docs)
+                        roteiro = rag.generate_script(
+                            sender_id, extracted_text, context_text
+                        )
                     else:
-                        await store_user_script(extracted_text, file_path)
-                        context_docs = await get_user_scripts_context(sender_id)
+                        roteiro = rag.generate_script(sender_id, extracted_text)
 
-                        if context_docs:
-                            context_text = prepare_context_from_docs(context_docs)
-                            roteiro = generate_script(
-                                sender_id, extracted_text, context_text
-                            )
-                        else:
-                            roteiro = generate_script(sender_id, extracted_text)
-
-                    script_file_path = "roteiro.txt"
-                    with open(script_file_path, "w", encoding="utf-8") as f:
-                        f.write(roteiro)
-
-                    return {"status": "doc received"}
+                unique_id = str(uuid.uuid4())
+                user_folder = os.path.join("roteiros", sender_id)
+                os.makedirs(user_folder, exist_ok=True)
+                script_file_path = os.path.join(user_folder, f"roteiro_{unique_id}.txt")
+                with open(script_file_path, "w", encoding="utf-8") as f:
+                    f.write(roteiro)
+                send_text_message(id_user, roteiro)
+                return {"status": "doc received"}
     except Exception as e:
         print("Error webhook:", e)
 
     return {"status": "ignored"}
 
 
-@app.post("/upload-pdf")
+@app.post("/teste/upload-pdf")
 async def upload_pdf(
     file: UploadFile = File(...),
     title: str = Form(None),
@@ -115,18 +110,18 @@ async def upload_pdf(
     is_script = any(
         keyword in file_path.lower() for keyword in ["script", "roteiro", "screenplay"]
     )
-
+    rag = RAG("teste")
     if is_script:
-        await store_user_script(user_id, extracted_text, doc_title)
+        await rag.store_user_script(user_id, extracted_text, doc_title)
         return {"status": "ok", "message": "Script stored for user inspiration"}
     else:
-        await store_user_script(extracted_text, doc_title)
+        await rag.store_user_script(extracted_text, doc_title)
         try:
-            context_docs = await get_user_scripts_context(user_id)
+            context_docs = await rag.get_user_scripts_context(user_id)
 
             if context_docs:
-                context_text = prepare_context_from_docs(context_docs)
-                roteiro = generate_script(extracted_text, context_text)
+                context_text = rag.prepare_context_from_docs(context_docs)
+                roteiro = rag.generate_script(extracted_text, context_text)
                 used_context = [
                     {
                         "title": doc.metadata.get("title", "untitled"),
@@ -136,7 +131,7 @@ async def upload_pdf(
                     for doc in context_docs
                 ]
             else:
-                roteiro = generate_script(extracted_text)
+                roteiro = rag.generate_script(extracted_text)
                 used_context = []
 
             with open("roteiro_gerado.txt", "w", encoding="utf-8") as f:
