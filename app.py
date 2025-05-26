@@ -1,28 +1,54 @@
 import uuid
-from fastapi import FastAPI, Request, UploadFile, File, Form
+from fastapi import FastAPI, Request
 import json
-from dotenv import load_dotenv
 import os
 from openai import OpenAI
 import re
+from users import UserManager
 from utils import (
     RAG,
-    extract_text_from_pdf,
+    extract_text,
     save_text_to_file,
     send_text_message
 )
 from embedding import default_vectorstore
-load_dotenv()
 client = OpenAI()
 app = FastAPI()
-prompt_briefing = os.getenv("PROMPT_BRIEFING")
-
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
-GRAPH_URL = os.getenv("GRAPH_URL")
+user_manager = UserManager()
 
 def clean_id(sender_id):
     return re.sub(r'[^a-zA-Z0-9_\-]', '_', sender_id)
+
+@app.get("/user_stats/{user_id}")
+async def get_user_stats_api(user_id: str):
+    """API endpoint to get user statistics - for Node.js service"""
+    try:
+        sender_id = clean_id(user_id)
+        stats = user_manager.get_user_stats(sender_id)
+
+        daily_used, daily_total = map(int, stats['daily_usage'].split('/'))
+        monthly_used, monthly_total = map(int, stats['monthly_usage'].split('/'))
+        
+        daily_remaining = max(0, daily_total - daily_used)
+        monthly_remaining = max(0, monthly_total - monthly_used)
+        
+        return {
+            "status": "success",
+             "data": {
+                "user_id": user_id,
+                "daily_remaining": daily_remaining,
+                "monthly_remaining": monthly_remaining,
+                "daily_used": daily_used,
+                "daily_total": daily_total,
+                "monthly_used": monthly_used,
+                "monthly_total": monthly_total,
+                "is_premium": stats['is_premium'],
+                "created_at": stats['created_at'],
+                "last_activity": stats['last_activity']
+            }
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.post("/receive_webhook")
 async def receive_webhook(request: Request):
@@ -41,18 +67,48 @@ async def receive_webhook(request: Request):
             id_user = message["from"]
             msg_type = message.get("type")
             sender_id = clean_id(id_user)
-            rag = RAG(sender_id)
-            if msg_type == "document":
+
+            can_send, limit_msg = user_manager.can_user_send_message(sender_id)
+
+            if msg_type == "chat":
+                text_content = message.get("text", "").lower().strip()
+                stats = user_manager.get_user_stats(sender_id)
+                daily_used, daily_total = map(int, stats['daily_usage'].split('/'))
+                monthly_used, monthly_total = map(int, stats['monthly_usage'].split('/'))
+                daily_remaining = max(0, daily_total - daily_used)
+                monthly_remaining = max(0, monthly_total - monthly_used)
+                
+                return {
+                    "status": "text_received",
+                    "user_id": id_user,
+                    "command": text_content,
+                    "user_stats": {
+                        "daily_remaining": daily_remaining,
+                        "monthly_remaining": monthly_remaining,
+                        "daily_used": daily_used,
+                        "daily_total": daily_total,
+                        "monthly_used": monthly_used,
+                        "monthly_total": monthly_total,
+                        "is_premium": stats['is_premium'],
+                        "created_at": stats['created_at']
+                    }
+                }
+            elif msg_type == "document":
+                can_send, limit_msg = user_manager.can_user_send_message(sender_id)
+                if not can_send:
+                    send_text_message(sender_id, limit_msg)
+                    return({"status": "rate limited", "message": limit_msg})
                 print("document")
+                rag = RAG(sender_id)
                 document = message.get("document", {})
-                file_path = document.get("file_path")
+                file_path = document.get("filePath")
                 file_name = os.path.basename(file_path).lower()
 
                 if not file_path or not os.path.exists(file_path):
                     return {"status": "error", "detail": "Arquivo não encontrado."}
 
                 print(f"Arquivo recebido em: {file_path}")
-                extracted_text = extract_text_from_pdf(file_path)
+                extracted_text = extract_text(file_path)
                 save_text_to_file(extracted_text)
 
                 is_script = any(
@@ -62,8 +118,13 @@ async def receive_webhook(request: Request):
 
                 if is_script:
                     await rag.store_user_script(extracted_text, file_path)
-                    return {"status": "script received"}
+                    return {
+                        "status": "script_received",
+                        "user_id": id_user,
+                        "message": "context received"
+                        }
                 else:
+                    user_manager.increment_usage(sender_id)
                     similar_docs = await rag.search_user_scripts(sender_id, extracted_text)
                     
                     if not similar_docs:
@@ -90,59 +151,15 @@ async def receive_webhook(request: Request):
 
     return {"status": "ignored"}
 
+@app.post("/admin/set_user_limits")
+async def set_user_limits(user_id: str, daily_limit: int = None, monthly_limit: int = None):
+    user_manager.set_user_limits(user_id, daily_limit, monthly_limit)
+    return {"status": "success", "message": f"Limits updated for user {user_id}"}
 
-@app.post("/teste/upload-pdf")
-async def upload_pdf(
-    file: UploadFile = File(...),
-    title: str = Form(None),
-    user_id: str = Form(...),
-    is_script: bool = Form(False),
-):
-    file_path = f"temp_{file.file_path}"
-    with open(file_path, "wb") as f:
-        f.write(await file.read())
-
-    extracted_text = extract_text_from_pdf(file_path)
-    save_text_to_file(extracted_text)
-
-    doc_title = title if title else file.file_path
-
-    is_script = any(
-        keyword in file_path.lower() for keyword in ["script", "roteiro", "screenplay"]
-    )
-    rag = RAG("teste")
-    if is_script:
-        await rag.store_user_script(user_id, extracted_text, doc_title)
-        return {"status": "ok", "message": "Script stored for user inspiration"}
-    else:
-        await rag.store_user_script(extracted_text, doc_title)
-        try:
-            context_docs = await rag.get_user_scripts_context(user_id)
-
-            if context_docs:
-                context_text = rag.prepare_context_from_docs(context_docs)
-                roteiro = rag.generate_script(extracted_text, context_text)
-                used_context = [
-                    {
-                        "title": doc.metadata.get("title", "untitled"),
-                        "doc_id": doc.metadata.get("doc_id"),
-                        "preview": doc.page_content[:200],
-                    }
-                    for doc in context_docs
-                ]
-            else:
-                roteiro = rag.generate_script(extracted_text)
-                used_context = []
-
-            with open("roteiro_gerado.txt", "w", encoding="utf-8") as f:
-                f.write(roteiro)
-            return {
-                "status": "ok",
-                "script": roteiro,
-                "used_context_documents": used_context,
-            }
-        except Exception as e:
-            return {"error": str(e)}
+@app.post("/admin/set_premium")
+async def set_premium_user(user_id: str, is_premium: bool = True):
+    user_manager.set_premium_user(user_id, is_premium)
+    return {"status": "success", "message": f"Premium status updated for user {user_id}"}
 
 
 @app.get("/list-documents")

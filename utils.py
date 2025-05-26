@@ -2,6 +2,7 @@ import fitz
 import requests
 from dotenv import load_dotenv
 import os
+from docx import Document as DocxDoc
 from langchain_core.documents import Document
 import uuid
 from langchain.chains import RetrievalQA
@@ -129,6 +130,26 @@ def extract_text_from_pdf(file_path):
     except Exception as e:
         print("error extracting text:", e)
     return text
+
+def extract_text_from_docx(file_path):
+    text = ""
+    try:
+        doc = DocxDoc(file_path)
+        for paragraph in doc.paragraphs:
+            text += paragraph.text + "\n"
+    except Exception as e:
+        print("error extracting text:", e)
+    return text
+
+def extract_text(file_path):
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == ".pdf":
+        return extract_text_from_pdf(file_path)
+    elif ext == ".docx":
+        return extract_text_from_docx(file_path)
+    else:
+        print("Formato não suportado:", ext)
+        return ""
 
 
 def save_text_to_file(text, filename="extracted_text.txt"):
